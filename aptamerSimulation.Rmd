@@ -25,7 +25,7 @@ library(caret)
 
 # Introduction
 
-This report is an exercise in simulating a toy version of a protein assay inspired by the aptamer-based Nautilus device. The proteome used is the collection of human blood-secreted proteins from the [Protein Atlas](https://www.proteinatlas.org/humanproteome/blood+protein/proteins+detected+by+immunoassay). All aptamers are tripeptides, and 1% of possible tripeptides here actually have an aptamer to be used for detection.
+This report is an exercise in simulating a toy version of a protein assay inspired by the aptamer-based Nautilus device. The proteome used is the collection of human blood-secreted proteins from the [Protein Atlas](https://www.proteinatlas.org/humanproteome/blood+protein/proteins+detected+by+immunoassay). All aptamers are tripeptides, and 10% of possible tripeptides here actually have an aptamer to be used for detection.
 
 # Data
 
