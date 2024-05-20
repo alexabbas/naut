@@ -1,0 +1,163 @@
+---
+title: "Protein Aptamer Deconvolution Simulation"
+author: "Alex Abbas"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    fig_caption: yes
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment = NA, message = F, warning = F)
+library(tidyverse)
+library(DT)
+library(ensembldb)
+library(EnsDb.Hsapiens.v86)
+library(mclust)
+library(MASS)
+library(caret)
+```
+
+# Introduction
+
+This report is an exercise in simulating a toy version of a protein assay inspired by the aptamer-based Nautilus device. The proteome used is the collection of human blood-secreted proteins from the [Protein Atlas](https://www.proteinatlas.org/humanproteome/blood+protein/proteins+detected+by+immunoassay). All aptamers are tripeptides, and 1% of possible tripeptides here actually have an aptamer to be used for detection.
+
+# Data
+
+## Proteins
+
+Human proteins from the Protein Atlas known to be secreted to blood:
+
+```{r}
+hpa = read.csv("data/proteinatlas.csv")
+hpa = hpa %>% dplyr::select(Gene, Ensembl, Gene.description, Uniprot, Secretome.location)
+hpa = hpa %>% mutate(SecretedBlood = Secretome.location == "Secreted to blood")
+secretome = hpa %>% dplyr::filter(SecretedBlood) %>% dplyr::select(-Secretome.location,-SecretedBlood)
+
+# build secretome library and aptamer library
+edb <- EnsDb.Hsapiens.v86
+prts1 <- proteins(edb, filter = GeneNameFilter(secretome$Gene), columns = c("gene_id","protein_sequence")) %>% data.frame
+prts = prts1 %>% group_by(gene_name) %>% dplyr::slice(1)
+meanConc = read.csv("data/meanConc.txt",sep="\t",header=F) # from 
+colnames(meanConc) = c("gene_name","description","X40.g.L.1","x")
+meanConc = meanConc %>% dplyr::select(-x)
+meanConc <- meanConc %>% separate(X40.g.L.1, c('MeanConc', 'MeanUnit'), sep = " ") %>% mutate(MeanConc = as.numeric(MeanConc))
+multHash = c(
+  "g/L" = 1e9,
+  "mg/L" = 1e6,
+  "µg/L" = 1e3,
+  "ng/L" = 1
+)
+meanConc = meanConc %>% mutate(MeanVal = MeanConc * multHash[MeanUnit])
+prts = inner_join(prts,meanConc)
+datatable(prts %>% dplyr::select(-protein_sequence, -MeanVal))
+```
+
+## Aptamers
+
+Here we create the aptamers. 1% of possible aptamers are available for use. Binding affinities of aptamers are assumed to be experimentally measured with a standard deviation of log10 0.6. A differential affinity of specific to non-specific aptamer binding is 1 * 10^4^.
+
+```{r}
+# set  parameters
+onTargetAffinity = 1e-5
+offTargetAffinity = 1e-1
+conc = 1e-3
+pctAptamerCoverage = 0.1
+affinityStdDev = 0.6
+
+get_kmers <- function(string, k=3) {
+  if (k > nchar(string)) { stop("k cannot be greater than the length of the string") } # Check if k is greater than the length of the string
+  kmers <- character(0) # Initialize an empty vector to store the kmers
+  for (i in 1:(nchar(string) - k + 1)) { # Loop through the string to extract kmers
+    kmer <- substr(string, i, i + k - 1)
+    kmers <- c(kmers, kmer)
+  }
+  kmers
+}
+
+trimers = sapply(prts$protein_sequence, get_kmers) %>% unlist %>% unique
+aptamers = sample(trimers, size = floor(length(trimers)/2))
+onTargetAffinities = rnorm(length(aptamers), mean = log10(onTargetAffinity), sd = affinityStdDev)
+names(onTargetAffinities) = aptamers
+offTargetAffinities = rnorm(length(aptamers), mean = log10(offTargetAffinity), sd = affinityStdDev)
+names(offTargetAffinities) = aptamers
+```
+
+`r length(aptamers)` aptamers are made.
+
+Plot the distribution of observed aptamer affinities for all tripeptides. The large peak is low affinity non-specific binding, and the small peak around -6 is the high affinity on-target binding.
+
+```{r}
+affinityMatrix = do.call(cbind,lapply(prts$protein_sequence, function(aseq) {
+  aseq_trimer_table = table(get_kmers(aseq))
+  aseq_trimer_apt = aseq_trimer_table[names(aseq_trimer_table) %in% aptamers]
+  aseq_trimer_apt[setdiff(aptamers,names(aseq_trimer_apt))] = 0
+  all_aptamers_counts = aseq_trimer_apt[aptamers]
+  affinities = offTargetAffinities + onTargetAffinities * all_aptamers_counts
+  affinities
+}))
+colnames(affinityMatrix) = prts$gene_name
+probMatrix = 1 / (1 + exp(1) ^ (affinityMatrix - log10(conc)))
+plot(density(affinityMatrix),xlim=c(-9,1))
+```
+
+## Probability fit
+
+Let's fit a two-group gaussian mixed model to the binding probabilities.
+
+```{r}
+dataToFit = sample(unlist(probMatrix),1e3)
+fit = Mclust(dataToFit, G=2, model="V")
+summary(fit)
+plot(fit, what="density", xlab = "Probability")
+```
+
+## Make test sample
+
+Now let's create one test sample of 100 proteins on 100 tiles (100% occupancy!), with proteins selected at random according to typical normal healthy blood serum protein relative abundances. Mostly albumin!
+
+```{r}
+numOfSpots = 1e2
+testProteins = sample(prts$gene_name, size = numOfSpots, prob = prts$MeanVal / max(prts$MeanVal), replace = T)
+aptamerHits = do.call(cbind, lapply(testProteins, function(testProtein) {
+  sapply(aptamers, function(aptamer) {
+    p = probMatrix[aptamer,testProtein]
+    sample(c(1,0), 1, prob = c(p,1-p))
+  })
+}))
+table(testProteins)
+```
+
+## Assess test sample
+
+Finally, let's run our virtual assay and empirically identify the proteins by the discrete values of aptamers that bound or did not bind to each protein, by computing a joint probability of each observed aptamer binding event for each possible protein identity. The raw score is just the pearson correlation of the observed aptamer binding states and the aptamer binding probabilities of the top match. The marginal p-value is the log10 difference between the probability of the top hit and the probability of the second place hit (so, the higher the better).
+
+```{r}
+cors = cor(aptamerHits, probMatrix)
+testResults = bind_rows(lapply(c(1:100),function(test_i){
+  aCors = cors[test_i,]
+  maxCor = max(aCors)
+  secondCor = sort(aCors,decreasing = T)[2]
+  fit = fitdistr(aCors, "normal")
+  para = fit$estimate
+  p1 = pnorm(maxCor, mean = para["mean"], sd = para["sd"], lower.tail=F)
+  p2 = pnorm(secondCor, mean = para["mean"], sd = para["sd"], lower.tail=F)
+  names(p2) = NULL
+  assignment = prts$gene_name[aCors==maxCor]
+  c("True_protein" = testProteins[test_i], "Inferred_protein" = assignment, "Score" = maxCor, "Marginal_Pval" = -log10(p1) + log10(p2))
+}))
+
+datatable(testResults)
+```
+
+And a confusion table of the results.
+
+```{r}
+confusion = confusionMatrix(data = factor(testResults$Inferred_protein), reference = factor(testResults$True_protein))
+confusion
+```
